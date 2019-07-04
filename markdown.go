@@ -19,7 +19,8 @@ import (
 // Markdown parsing and processing
 //
 
-// Version string of the package.
+// Version string of the package. Appears in the rendered document when
+// CompletePage flag is on.
 const Version = "2.0"
 
 // Extensions is a bitwise or'ed collection of enabled Blackfriday's
@@ -92,73 +93,83 @@ const (
 // blockTags is a set of tags that are recognized as HTML block tags.
 // Any of these can be included in markdown text without special escaping.
 var blockTags = map[string]struct{}{
-	"blockquote": struct{}{},
-	"del":        struct{}{},
-	"div":        struct{}{},
-	"dl":         struct{}{},
-	"fieldset":   struct{}{},
-	"form":       struct{}{},
-	"h1":         struct{}{},
-	"h2":         struct{}{},
-	"h3":         struct{}{},
-	"h4":         struct{}{},
-	"h5":         struct{}{},
-	"h6":         struct{}{},
-	"iframe":     struct{}{},
-	"ins":        struct{}{},
-	"math":       struct{}{},
-	"noscript":   struct{}{},
-	"ol":         struct{}{},
-	"pre":        struct{}{},
-	"p":          struct{}{},
-	"script":     struct{}{},
-	"style":      struct{}{},
-	"table":      struct{}{},
-	"ul":         struct{}{},
+	"blockquote": {},
+	"del":        {},
+	"div":        {},
+	"dl":         {},
+	"fieldset":   {},
+	"form":       {},
+	"h1":         {},
+	"h2":         {},
+	"h3":         {},
+	"h4":         {},
+	"h5":         {},
+	"h6":         {},
+	"iframe":     {},
+	"ins":        {},
+	"math":       {},
+	"noscript":   {},
+	"ol":         {},
+	"pre":        {},
+	"p":          {},
+	"script":     {},
+	"style":      {},
+	"table":      {},
+	"ul":         {},
 
 	// HTML5
-	"address":    struct{}{},
-	"article":    struct{}{},
-	"aside":      struct{}{},
-	"canvas":     struct{}{},
-	"figcaption": struct{}{},
-	"figure":     struct{}{},
-	"footer":     struct{}{},
-	"header":     struct{}{},
-	"hgroup":     struct{}{},
-	"main":       struct{}{},
-	"nav":        struct{}{},
-	"output":     struct{}{},
-	"progress":   struct{}{},
-	"section":    struct{}{},
-	"video":      struct{}{},
+	"address":    {},
+	"article":    {},
+	"aside":      {},
+	"canvas":     {},
+	"figcaption": {},
+	"figure":     {},
+	"footer":     {},
+	"header":     {},
+	"hgroup":     {},
+	"main":       {},
+	"nav":        {},
+	"output":     {},
+	"progress":   {},
+	"section":    {},
+	"video":      {},
 }
 
-// Renderer is the rendering interface.
-// This is mostly of interest if you are implementing a new rendering format.
+// Renderer is the rendering interface. This is mostly of interest if you are
+// implementing a new rendering format.
 //
-// When a byte slice is provided, it contains the (rendered) contents of the
-// element.
-//
-// When a callback is provided instead, it will write the contents of the
-// respective element directly to the output buffer and return true on success.
-// If the callback returns false, the rendering function should reset the
-// output buffer as though it had never been called.
-//
-// Only an HTML implementation is provided in this repository,
-// see the README for external implementations.
+// Only an HTML implementation is provided in this repository, see the README
+// for external implementations.
 type Renderer interface {
-	Render(ast *Node) []byte
+	// RenderNode is the main rendering method. It will be called once for
+	// every leaf node and twice for every non-leaf node (first with
+	// entering=true, then with entering=false). The method should write its
+	// rendition of the node to the supplied writer w.
 	RenderNode(w io.Writer, node *Node, entering bool) WalkStatus
+
+	// RenderHeader is a method that allows the renderer to produce some
+	// content preceding the main body of the output document. The header is
+	// understood in the broad sense here. For example, the default HTML
+	// renderer will write not only the HTML document preamble, but also the
+	// table of contents if it was requested.
+	//
+	// The method will be passed an entire document tree, in case a particular
+	// implementation needs to inspect it to produce output.
+	//
+	// The output should be written to the supplied writer w. If your
+	// implementation has no header to write, supply an empty implementation.
+	RenderHeader(w io.Writer, ast *Node)
+
+	// RenderFooter is a symmetric counterpart of RenderHeader.
+	RenderFooter(w io.Writer, ast *Node)
 }
 
 // Callback functions for inline parsing. One such function is defined
 // for each character that triggers a response when parsing inline data.
 type inlineParser func(p *Markdown, data []byte, offset int) (int, *Node)
 
-// Markdown is a type that holds:
-// - extensions and the runtime state used by Parse,
-// - the renderer.
+// Markdown is a type that holds extensions and the runtime state used by
+// Parse, and the renderer. You can not use it directly, construct it with New.
 type Markdown struct {
 	renderer          Renderer
 	referenceOverride ReferenceOverrideFunc
@@ -374,13 +385,21 @@ func Run(input []byte, opts ...Option) []byte {
 	optList := []Option{WithRenderer(r), WithExtensions(CommonExtensions)}
 	optList = append(optList, opts...)
 	parser := New(optList...)
-	return parser.renderer.Render(parser.Parse(input))
+	ast := parser.Parse(input)
+	var buf bytes.Buffer
+	parser.renderer.RenderHeader(&buf, ast)
+	ast.Walk(func(node *Node, entering bool) WalkStatus {
+		return parser.renderer.RenderNode(&buf, node, entering)
+	})
+	parser.renderer.RenderFooter(&buf, ast)
+	return buf.Bytes()
 }
 
 // Parse is an entry point to the parsing part of Blackfriday. It takes an
 // input markdown document and produces a syntax tree for its contents. This
 // tree can then be rendered with a default or custom renderer, or
 // analyzed/transformed by the caller to whatever non-standard needs they have.
+// The return value is the root node of the syntax tree.
 func (p *Markdown) Parse(input []byte) *Node {
 	p.block(input)
 	// Walk the tree and finish up some of unfinished blocks
@@ -461,11 +480,11 @@ func (p *Markdown) parseRefsToAST() {
 //    [^note]: This is the explanation.
 //
 // Footnotes should be placed at the end of the document in an ordered list.
-// Inline footnotes such as:
+// Finally, there are inline footnotes such as:
 //
-//    Inline footnotes^[Not supported.] also exist.
+//    Inline footnotes^[Also supported.] provide a quick inline explanation,
+//    but are rendered at the bottom of the document.
 //
-// are not yet supported.
 
 // reference holds all information necessary for a reference-style links or
 // footnotes.
@@ -794,7 +813,17 @@ func ispunct(c byte) bool {
 
 // Test if a character is a whitespace character.
 func isspace(c byte) bool {
-	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v'
+	return ishorizontalspace(c) || isverticalspace(c)
+}
+
+// Test if a character is a horizontal whitespace character.
+func ishorizontalspace(c byte) bool {
+	return c == ' ' || c == '\t'
+}
+
+// Test if a character is a vertical character.
+func isverticalspace(c byte) bool {
+	return c == '\n' || c == '\r' || c == '\f' || c == '\v'
 }
 
 // Test if a character is letter.
